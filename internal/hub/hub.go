@@ -17,6 +17,8 @@ import (
 
 // PlayerSlot is the lobby-browser player row (matches lobbies.js shape).
 type PlayerSlot struct {
+	Hero       string `json:"hero,omitempty"`
+	Difficulty string `json:"difficulty,omitempty"`
 	PlayerID   int    `json:"player_id"`
 	Controller string `json:"controller,omitempty"`
 	Username   string `json:"username"`
@@ -55,6 +57,7 @@ type Client struct {
 
 // Room runs one game: a sim world plus its clients and tick loop.
 type Room struct {
+	dota    bool
 	LobbyID string
 	world   *sim.World
 
@@ -142,6 +145,7 @@ func (hub *Hub) Get(lobbyID string) *Lobby {
 func newRoom(lobbyID, mapName string) *Room {
 	room := &Room{
 		LobbyID:   lobbyID,
+		dota:      sim.IsDotaMap(mapName),
 		world:     sim.NewWorld(),
 		clients:   map[int]*Client{},
 		broadcast: make(chan []byte, 256),
@@ -170,7 +174,21 @@ func (hub *Hub) Join(lobbyID string, preferredTeam *string, username, faction st
 		hub.mutex.Unlock()
 		return nil, nil, fmt.Errorf("lobby full")
 	}
-	team := pickTeam(room, preferredTeam)
+	dota := sim.IsDotaMap(lobby.Map)
+	if dota && lobby.Started {
+		room.mutex.Unlock()
+		hub.mutex.Unlock()
+		return nil, nil, fmt.Errorf("the Dota match has already started")
+	}
+	var team string
+	hero := ""
+	if dota {
+		team = pickTeam(room, nil) // One seat per side.
+		hero = sim.DefaultDotaHero(team)
+		faction = "ig"
+	} else {
+		team = pickTeam(room, preferredTeam)
+	}
 	room.nextPlayerID++
 	playerID := room.nextPlayerID
 	client := &Client{PlayerID: playerID, Team: team, Out: make(chan []byte, 64), Done: make(chan struct{}), Username: username, Faction: faction}
@@ -180,7 +198,9 @@ func (hub *Hub) Join(lobbyID string, preferredTeam *string, username, faction st
 	}
 	room.mutex.Unlock()
 
-	room.world.SpawnLobbySquad(team, playerID, faction, lobby.Map)
+	if !dota {
+		room.world.SpawnLobbySeat(team, playerID, faction, lobby.Map)
+	}
 	if lobby.HostID == 0 {
 		lobby.HostID = playerID
 	}
@@ -192,7 +212,7 @@ func (hub *Hub) Join(lobbyID string, preferredTeam *string, username, faction st
 	if username == "" {
 		username = fmt.Sprintf("Player%d", playerID)
 	}
-	lobby.Players = append(lobby.Players, PlayerSlot{PlayerID: playerID, Controller: "human", Username: username, Faction: faction, Team: slotTeam, Ping: 0})
+	lobby.Players = append(lobby.Players, PlayerSlot{PlayerID: playerID, Controller: "human", Username: username, Faction: faction, Hero: hero, Team: slotTeam, Ping: 0})
 	hub.mutex.Unlock()
 	hub.BroadcastLobby(lobbyID, playerID)
 
@@ -235,6 +255,9 @@ func (hub *Hub) Leave(lobbyID string, client *Client) {
 			if slot.PlayerID < 0 {
 				room.world.RemovePlayerSquads(slot.PlayerID)
 			}
+		}
+		if sim.IsDotaMap(lobby.Map) {
+			room.world.ResetDotaMatch()
 		}
 		keep = nil
 		lobby.Started = false
@@ -350,15 +373,10 @@ func (room *Room) loop() {
 			if room.running {
 				room.world.Advance(room.tickRate.Seconds())
 			}
-			payload := room.snapshotFrame()
-			for _, client := range room.clients {
-				if !client.ready {
-					continue
-				}
-				select {
-				case client.Out <- payload:
-				default:
-				}
+			// Send Dota's initial snapshot once. Terrain loading can block the
+			// browser for several seconds, so defer the tick stream until ready.
+			if !room.dota || room.running {
+				room.broadcastSnapshotLocked(false)
 			}
 			room.mutex.Unlock()
 		}

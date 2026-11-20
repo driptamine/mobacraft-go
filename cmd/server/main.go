@@ -8,7 +8,7 @@
 //
 // WebTransport needs a TLS certificate. On first start the server
 // generates a self-signed cert in --cert-dir and prints its SHA-256 hash:
-// paste that hash into SERVER_CERT_HASH in src/net/multiplayer.ts.
+// /api/connection advertises the current endpoint and fingerprint.
 package main
 
 import (
@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -42,6 +43,7 @@ import (
 func main() {
 	httpAddress := flag.String("http", ":8080", "HTTP/WebSocket/lobby listen address")
 	webTransportAddress := flag.String("wt", ":4433", "WebTransport (QUIC) listen address")
+	publicWebTransport := flag.String("wt-public-url", "", "public HTTPS WebTransport URL, including /grimcraft")
 	certificateDirectory := flag.String("cert-dir", "certs", "directory for the self-signed WT certificate")
 	skipWebTransport := flag.Bool("no-wt", false, "disable WebTransport, serve HTTP/WS only")
 	flag.Parse()
@@ -49,7 +51,7 @@ func main() {
 	gameHub := hub.NewHub()
 
 	router := http.NewServeMux()
-	connection := &server.ConnectionInfo{}
+	connection := &server.ConnectionInfo{WebSocketPath: "/join"}
 	router.Handle("/api/", server.API(gameHub, connection))
 	router.HandleFunc("/join", transport.WSHandler(gameHub))
 	router.HandleFunc("/grimcraft", func(writer http.ResponseWriter, request *http.Request) {
@@ -72,6 +74,14 @@ func main() {
 	fingerprint := sha256.Sum256(certificateDER)
 	connection.Enabled = true
 	connection.WebTransportURL = listenURL("https", *webTransportAddress) + "/grimcraft"
+	if *publicWebTransport != "" {
+		endpoint, err := url.Parse(*publicWebTransport)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.Path != "/grimcraft" ||
+			endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			log.Fatal("--wt-public-url must be an HTTPS URL ending in /grimcraft")
+		}
+		connection.WebTransportURL = endpoint.String()
+	}
 	connection.CertificateHash = hex.EncodeToString(fingerprint[:])
 	fmt.Printf(`
 ══════════════════════════════════════════════════════════════
@@ -80,11 +90,9 @@ func main() {
   WebTransport    : %s
   Lobbies         : %d seeded (each = one room)
 
-  FRONTEND WIRING (src/net/multiplayer.ts):
-    SERVER_URL       = '%s'
-    SERVER_CERT_HASH = '%s'
+  Connection details available at /api/connection
 ══════════════════════════════════════════════════════════════
-`, listenURL("http", *httpAddress), listenURL("https", *webTransportAddress)+"/grimcraft", len(gameHub.List()), listenURL("https", *webTransportAddress)+"/grimcraft", hex.EncodeToString(fingerprint[:]))
+`, listenURL("http", *httpAddress), connection.WebTransportURL, len(gameHub.List()))
 
 	webTransportServer := &webtransport.Server{
 		H3:          http3.Server{Addr: *webTransportAddress, TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}}},

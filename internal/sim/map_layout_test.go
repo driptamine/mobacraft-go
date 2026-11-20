@@ -4,8 +4,8 @@ import "testing"
 
 func TestAlvarusLayout(testCase *testing.T) {
 	world := NewWorld()
-	world.SpawnLobbySquad("Blue", 1, "ig", "Alvarus")
-	world.SpawnLobbySquad("Red", 2, "ig", "Alvarus")
+	world.SpawnLobbySeat("Blue", 1, "ig", "Alvarus")
+	world.SpawnLobbySeat("Red", 2, "ig", "Alvarus")
 	layout := layoutFor("/maps/6p_alvarus/6p_alvarus.sgb")
 	if len(world.Points) != len(layout.Points) || len(layout.Points) != 24 {
 		testCase.Fatalf("wrong points: %d", len(world.Points))

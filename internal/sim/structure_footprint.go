@@ -130,15 +130,36 @@ func segmentEntersFootprint(from, to protocol.Vec3, bounds footprintBounds) bool
 }
 
 func constructionApproachWaypoint(from, goal protocol.Vec3, footprint footprintBounds) protocol.Vec3 {
+	return constructionRouteWaypoint(from, goal, []footprintBounds{footprint})
+}
+
+func constructionRouteWaypoint(from, goal protocol.Vec3, footprints []footprintBounds) protocol.Vec3 {
 	padding := workerCollisionRadius + .35
-	bounds := footprintBounds{footprint.MinX - padding, footprint.MaxX + padding, footprint.MinZ - padding, footprint.MaxZ + padding}
-	if insideFootprint(from, bounds, 0) {
-		return outsideFootprint(from, bounds, .01)
+	obstacles := make([]footprintBounds, 0, len(footprints))
+	points := []protocol.Vec3{from, goal}
+	for _, footprint := range footprints {
+		if footprint.MaxX < math.Min(from.X, goal.X)-12 || footprint.MinX > math.Max(from.X, goal.X)+12 || footprint.MaxZ < math.Min(from.Z, goal.Z)-12 || footprint.MinZ > math.Max(from.Z, goal.Z)+12 {
+			continue
+		}
+		bounds := footprintBounds{footprint.MinX - padding, footprint.MaxX + padding, footprint.MinZ - padding, footprint.MaxZ + padding}
+		if insideFootprint(from, bounds, 0) {
+			return outsideFootprint(from, bounds, .01)
+		}
+		obstacles = append(obstacles, bounds)
+		points = append(points, protocol.Vec3{X: bounds.MinX, Z: bounds.MinZ}, protocol.Vec3{X: bounds.MaxX, Z: bounds.MinZ}, protocol.Vec3{X: bounds.MinX, Z: bounds.MaxZ}, protocol.Vec3{X: bounds.MaxX, Z: bounds.MaxZ})
 	}
-	if !segmentEntersFootprint(from, goal, bounds) {
+	blocked := func(left, right protocol.Vec3) bool {
+		for _, bounds := range obstacles {
+			if segmentEntersFootprint(left, right, bounds) {
+				return true
+			}
+		}
+		return false
+	}
+	if !blocked(from, goal) {
 		return goal
 	}
-	points := []protocol.Vec3{from, goal, {X: bounds.MinX, Z: bounds.MinZ}, {X: bounds.MaxX, Z: bounds.MinZ}, {X: bounds.MinX, Z: bounds.MaxZ}, {X: bounds.MaxX, Z: bounds.MaxZ}}
+
 	distances, previous, visited := make([]float64, len(points)), make([]int, len(points)), make([]bool, len(points))
 	for index := range points {
 		distances[index], previous[index] = math.Inf(1), -1
@@ -156,7 +177,7 @@ func constructionApproachWaypoint(from, goal protocol.Vec3, footprint footprintB
 		}
 		visited[current] = true
 		for next := range points {
-			if next == current || visited[next] || segmentEntersFootprint(points[current], points[next], bounds) {
+			if next == current || visited[next] || blocked(points[current], points[next]) {
 				continue
 			}
 			distance := distances[current] + dist(points[current], points[next])

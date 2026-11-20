@@ -24,33 +24,35 @@ func TestOnlineLobbyStartFactionAndHost(testCase *testing.T) {
 	if !isValid {
 		testCase.Fatal("cannot choose faction")
 	}
-	_, isValid, reason := gameHub.HandleLobbyCommand(lobby.ID, host, map[string]any{"StartGame": map[string]any{"computers": []any{map[string]any{"faction": "Necrons", "team": 2}}}})
+	_, invalidDifficultyAccepted, _ := gameHub.HandleLobbyCommand(lobby.ID, host, map[string]any{"StartGame": map[string]any{"computers": []any{map[string]any{"faction": "Necrons", "team": 2, "difficulty": "impossible"}}}})
+	if invalidDifficultyAccepted || lobby.Started {
+		testCase.Fatal("invalid bot difficulty started a match")
+	}
+	_, isValid, reason := gameHub.HandleLobbyCommand(lobby.ID, host, map[string]any{"StartGame": map[string]any{"computers": []any{map[string]any{"faction": "Necrons", "team": 2, "difficulty": "hard"}}}})
 	if !isValid {
 		testCase.Fatal(reason)
 	}
 	if !lobby.Started || lobby.Current != 3 {
 		testCase.Fatalf("wrong lobby state: %+v", lobby)
 	}
+	if lobby.room.World().Players[-1].Difficulty != "hard" || lobby.Players[len(lobby.Players)-1].Difficulty != "hard" {
+		testCase.Fatal("bot difficulty did not reach Go authority and lobby state")
+	}
 	snapshot := lobby.room.World().Snapshot()
-	if len(snapshot.Squads) != 6 {
-		testCase.Fatal("missing computer")
+	if len(snapshot.Squads) != 0 || len(lobby.room.World().Builders) != 3 || len(lobby.room.World().Buildings) != 3 {
+		testCase.Fatal("missing computer HQ/worker, or unwanted starting army")
 	}
 	found := false
-	for _, pair := range snapshot.Squads {
-		data := pair[1].(map[string]any)
-		if data["owner"] == host.PlayerID {
-			found = data["faction"] == "space marines"
-			position := data["position"]
-			if position == nil {
-				testCase.Fatal("no position")
-			}
+	for _, worker := range lobby.room.World().Builders {
+		if worker.Owner == host.PlayerID {
+			found = worker.Faction == "space marines"
 		}
 	}
 	if !found {
 		testCase.Fatal("chosen faction not replicated")
 	}
 	_, isValid, _ = gameHub.HandleLobbyCommand(lobby.ID, host, map[string]any{"StartGame": map[string]any{}})
-	if !isValid || len(lobby.room.World().Snapshot().Squads) != 6 {
+	if !isValid || len(lobby.room.World().Snapshot().Squads) != 0 || len(lobby.room.World().Builders) != 3 {
 		testCase.Fatal("repeated start duplicated units")
 	}
 	gameHub.Leave(lobby.ID, guest)

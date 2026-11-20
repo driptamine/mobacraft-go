@@ -4,8 +4,10 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"grimcraft-go/internal/hub"
+	"grimcraft-go/internal/sim"
 )
 
 // ConnectionInfo contains only public connection metadata, never private key material.
@@ -13,6 +15,7 @@ type ConnectionInfo struct {
 	Enabled         bool   `json:"enabled"`
 	WebTransportURL string `json:"webtransport_url"`
 	CertificateHash string `json:"certificate_hash"`
+	WebSocketPath   string `json:"websocket_path,omitempty"`
 }
 
 // API serves GET/POST /api/lobbies in the lobbies.js shape so the
@@ -35,6 +38,7 @@ func API(gameHub *hub.Hub, connection ...*ConnectionInfo) http.Handler {
 	router.HandleFunc("/api/lobbies", func(writer http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
+			writer.Header().Set("Cache-Control", "no-store")
 			writeJSON(writer, gameHub.List())
 		case http.MethodPost:
 			var createRequest struct {
@@ -47,11 +51,27 @@ func API(gameHub *hub.Hub, connection ...*ConnectionInfo) http.Handler {
 				http.Error(writer, "bad json", http.StatusBadRequest)
 				return
 			}
+			mapName := strings.TrimSpace(createRequest.Map)
+			if mapName == "" {
+				mapName = "Arena"
+			}
+			title, seats, supported := sim.MultiplayerMap(mapName)
+			if !supported {
+				http.Error(writer, "This battlefield is unavailable for online multiplayer.", http.StatusBadRequest)
+				return
+			}
 			total := createRequest.Capacity
 			if total <= 0 {
 				total = createRequest.Total
 			}
-			lobby := gameHub.CreateLobby(createRequest.Name, createRequest.Map, total)
+			if total <= 0 {
+				total = seats
+			}
+			if total < 2 || total > seats {
+				http.Error(writer, "Invalid lobby capacity for this battlefield.", http.StatusBadRequest)
+				return
+			}
+			lobby := gameHub.CreateLobby(createRequest.Name, title, total)
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusCreated)
 			writeJSON(writer, lobby)

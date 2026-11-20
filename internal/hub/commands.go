@@ -148,6 +148,16 @@ func HandleCommand(world *sim.World, playerID int, currentCommand map[string]any
 				return true, ""
 			}
 			return true, ""
+		case "AttackBuilding":
+			targetID, valid := toInt(arguments["target_building"])
+			if !valid {
+				return false, "bad target_building"
+			}
+			_, rejected := world.AttackBuilding(playerID, toIntList(arguments["attacker_ids"]), targetID)
+			if len(rejected) > 0 {
+				return false, fmt.Sprintf("rejected attackers %v", rejected)
+			}
+			return true, ""
 		case "UnitCommand":
 			command := toString(arguments["command"])
 			if command == "" {

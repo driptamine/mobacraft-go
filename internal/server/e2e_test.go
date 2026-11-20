@@ -67,22 +67,24 @@ func TestWSJoinSessionSnapshot(testCase *testing.T) {
 		testCase.Fatalf("second message must be Snapshot, got %v", snapshotMsg)
 	}
 
-	// Send a MoveSquads for our own squad id.
+	// Initial snapshots contain HQ and worker only. Gameplay is still gated by loading.
 	entities := snapshotMsg["Snapshot"].(map[string]any)["entities"].([]any)
-	if len(entities) == 0 {
-		testCase.Fatal("snapshot has no entities")
-	}
-	ownSquadID := 0.0
+	ownWorkerID := 0.0
 	for _, entity := range entities {
-		entityRecord := entity.(map[string]any)
-		components := entityRecord["components"].(map[string]any)
-		if _, isValid := components["squad"]; isValid {
-			ownSquadID = entityRecord["id"].(float64)
-			break
+		record := entity.(map[string]any)
+		components := record["components"].(map[string]any)
+		if _, hasSquad := components["squad"]; hasSquad {
+			testCase.Fatal("unexpected starting combat squad")
+		}
+		if _, hasWorker := components["builder"]; hasWorker {
+			ownWorkerID = record["id"].(float64)
 		}
 	}
-	commandDoc := map[string]any{"Command": map[string]any{"MoveSquads": map[string]any{
-		"squad_ids": []any{ownSquadID}, "target": map[string]any{"x": 5, "y": 0, "z": 5},
+	if ownWorkerID == 0 {
+		testCase.Fatal("snapshot has no starting worker")
+	}
+	commandDoc := map[string]any{"Command": map[string]any{"MoveBuilders": map[string]any{
+		"builder_ids": []any{ownWorkerID}, "target": map[string]any{"x": 5, "y": 0, "z": 5},
 	}}}
 	commandJSON, _ := json.Marshal(commandDoc)
 	if writeCommandError := connection.Write(requestContext, websocket.MessageText, commandJSON); writeCommandError != nil {

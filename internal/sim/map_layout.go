@@ -25,16 +25,22 @@ type mapPoint struct {
 	Kind string  `json:"kind"`
 }
 type mapLayout struct {
-	Name          string        `json:"name"`
-	Positions     []mapPosition `json:"positions"`
-	Points        []mapPoint    `json:"strategicPoints"`
-	CenterPoints  [][2]float64  `json:"centerPoints"`
-	Ring          bool          `json:"ringPerPosition"`
-	Offsets       [][2]float64  `json:"ringOffsets"`
-	RelicDistance float64       `json:"relicDistance"`
+	Bounds        float64                               `json:"bounds"`
+	Name          string                                `json:"name"`
+	Positions     []mapPosition                         `json:"positions"`
+	HeroStarts    map[string]protocol.Vec3              `json:"heroStarts"`
+	Points        []mapPoint                            `json:"strategicPoints"`
+	CenterPoints  [][2]float64                          `json:"centerPoints"`
+	Ring          bool                                  `json:"ringPerPosition"`
+	Offsets       [][2]float64                          `json:"ringOffsets"`
+	RelicDistance float64                               `json:"relicDistance"`
+	Lanes         map[string]map[string][]protocol.Vec3 `json:"lanes"`
 }
 
 func mapNameKey(name string) string {
+	if strings.HasSuffix(strings.ToLower(name), "/dotamap-game/map.json") {
+		return "dotamapgame"
+	}
 	name = strings.TrimSuffix(path.Base(name), ".sgb")
 	if len(name) > 2 && name[0] >= '0' && name[0] <= '9' && name[1] == 'p' {
 		name = name[2:]
@@ -46,26 +52,44 @@ func mapNameKey(name string) string {
 		return -1
 	}, name)
 }
-func layoutFor(name string) mapLayout {
+func findMapLayout(name string) (mapLayout, bool) {
 	key := mapNameKey(name)
 	if key == "arena" {
 		key = "defaultarena"
 	}
 	entries, _ := mapFiles.ReadDir("maps")
-	var fallback mapLayout
+	for _, mapFile := range entries {
+		if key != mapNameKey(strings.TrimSuffix(mapFile.Name(), ".json")) {
+			continue
+		}
+		data, _ := mapFiles.ReadFile("maps/" + mapFile.Name())
+		var layout mapLayout
+		if json.Unmarshal(data, &layout) == nil {
+			return layout, true
+		}
+	}
+	// Some original map labels differ from their archive filenames.
 	for _, mapFile := range entries {
 		data, _ := mapFiles.ReadFile("maps/" + mapFile.Name())
 		var layout mapLayout
-		if json.Unmarshal(data, &layout) != nil {
-			continue
-		}
-		if mapNameKey(layout.Name) == "defaultarena" {
-			fallback = layout
-		}
-		if mapNameKey(layout.Name) == key {
-			return layout
+		if json.Unmarshal(data, &layout) == nil && mapNameKey(layout.Name) == key {
+			return layout, true
 		}
 	}
+	return mapLayout{}, false
+}
+
+// MultiplayerMap checks that a lobby map has a server-side battlefield.
+func MultiplayerMap(name string) (title string, seats int, ok bool) {
+	layout, found := findMapLayout(name)
+	return layout.Name, len(layout.Positions), found
+}
+
+func layoutFor(name string) mapLayout {
+	if layout, found := findMapLayout(name); found {
+		return layout
+	}
+	fallback, _ := findMapLayout("Arena")
 	return fallback
 }
 func (world *World) seedMapPointsLocked(layout mapLayout) {
@@ -73,6 +97,10 @@ func (world *World) seedMapPointsLocked(layout mapLayout) {
 		return
 	}
 	world.pointsSeeded = true
+	world.mapBounds = layout.Bounds
+	if world.mapBounds <= 0 {
+		world.mapBounds = 256
+	}
 	points := layout.Points
 	if len(points) == 0 {
 		for _, pointCoordinates := range layout.CenterPoints {

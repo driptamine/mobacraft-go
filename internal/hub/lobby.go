@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"grimcraft-go/internal/balance"
+	"grimcraft-go/internal/botai"
+	"grimcraft-go/internal/sim"
 	"time"
 )
 
@@ -34,7 +36,8 @@ func (gameHub *Hub) HandleLobbyCommand(lobbyID string, client *Client, command m
 	_, start := command["StartGame"]
 	_, loaded := command["PlayerLoaded"]
 	factionArgs, factionChange := command["SetLobbyFaction"]
-	if !start && !factionChange && !loaded {
+	heroArgs, heroChange := command["SetLobbyHero"]
+	if !start && !factionChange && !loaded && !heroChange {
 		return false, false, ""
 	}
 	gameHub.mutex.Lock()
@@ -57,11 +60,41 @@ func (gameHub *Hub) HandleLobbyCommand(lobbyID string, client *Client, command m
 		}
 		room.loaded[client.PlayerID] = true
 		room.maybeStartLocked()
+		if room.dota && !room.running {
+			room.broadcastSnapshotLocked(true)
+		}
 		room.mutex.Unlock()
 		gameHub.mutex.Unlock()
 		return true, true, ""
 	}
+	dota := sim.IsDotaMap(lobby.Map)
+	if heroChange {
+		if !dota || lobby.Started {
+			gameHub.mutex.Unlock()
+			return true, false, "hero selection is unavailable"
+		}
+		arguments, _ := heroArgs.(map[string]any)
+		hero, _ := arguments["hero"].(string)
+		if !sim.ValidDotaHero(hero) {
+			gameHub.mutex.Unlock()
+			return true, false, "unknown hero"
+		}
+		for index := range lobby.Players {
+			if lobby.Players[index].PlayerID == client.PlayerID {
+				lobby.Players[index].Hero = hero
+				gameHub.mutex.Unlock()
+				gameHub.BroadcastLobby(lobbyID)
+				return true, true, ""
+			}
+		}
+		gameHub.mutex.Unlock()
+		return true, false, "not a member"
+	}
 	if factionChange {
+		if dota {
+			gameHub.mutex.Unlock()
+			return true, false, "choose a hero in this lobby"
+		}
 		if lobby.Started {
 			gameHub.mutex.Unlock()
 			return true, false, "game already started"
@@ -90,8 +123,10 @@ func (gameHub *Hub) HandleLobbyCommand(lobbyID string, client *Client, command m
 	var currentArguments struct {
 		BalanceMod *balance.Mod `json:"balanceMod"`
 		Computers  []struct {
-			Faction string `json:"faction"`
-			Team    int    `json:"team"`
+			Faction    string `json:"faction"`
+			Hero       string `json:"hero"`
+			Difficulty string `json:"difficulty"`
+			Team       int    `json:"team"`
 		} `json:"computers"`
 	}
 	encodedData, _ := json.Marshal(command["StartGame"])
@@ -108,9 +143,17 @@ func (gameHub *Hub) HandleLobbyCommand(lobbyID string, client *Client, command m
 		teams[playerSlot.Team] = true
 	}
 	for _, bot := range currentArguments.Computers {
+		if bot.Difficulty != "" && !botai.ValidDifficulty(bot.Difficulty) {
+			gameHub.mutex.Unlock()
+			return true, false, "invalid AI difficulty"
+		}
 		if bot.Team != 1 && bot.Team != 2 {
 			gameHub.mutex.Unlock()
 			return true, false, "invalid computer team"
+		}
+		if dota && bot.Hero != "" && !sim.ValidDotaHero(bot.Hero) {
+			gameHub.mutex.Unlock()
+			return true, false, "unknown computer hero"
 		}
 		teams[bot.Team] = true
 	}
@@ -118,7 +161,7 @@ func (gameHub *Hub) HandleLobbyCommand(lobbyID string, client *Client, command m
 		gameHub.mutex.Unlock()
 		return true, false, "add an opponent or wait for another player"
 	}
-	if currentArguments.BalanceMod != nil {
+	if !dota && currentArguments.BalanceMod != nil {
 		if operationError := lobby.room.world.InstallBalance(currentArguments.BalanceMod); operationError != nil {
 			gameHub.mutex.Unlock()
 			return true, false, "invalid balance mod: " + operationError.Error()
@@ -133,15 +176,39 @@ func (gameHub *Hub) HandleLobbyCommand(lobbyID string, client *Client, command m
 			team = "Red"
 		}
 		owner := -(currentIndex + 1)
-		lobby.room.world.AddComputer(team, owner, bot.Faction, lobby.Map)
-		lobby.Players = append(lobby.Players, PlayerSlot{PlayerID: owner, Controller: "computer", Username: fmt.Sprintf("Computer %d", currentIndex+1), Faction: bot.Faction, Team: bot.Team})
+		hero := bot.Hero
+		if dota {
+			bot.Faction = "ig"
+			if hero == "" {
+				hero = sim.DefaultDotaHero(team)
+			}
+		} else {
+			lobby.room.world.AddComputer(team, owner, bot.Faction, lobby.Map)
+			lobby.room.world.SetComputerDifficulty(owner, bot.Difficulty)
+		}
+		lobby.Players = append(lobby.Players, PlayerSlot{PlayerID: owner, Controller: "computer", Difficulty: bot.Difficulty, Username: fmt.Sprintf("Computer %d", currentIndex+1), Faction: bot.Faction, Hero: hero, Team: bot.Team})
 	}
 	lobby.room.mutex.Lock()
-	lobby.room.world.ResetMatchClock()
+	if dota {
+		seats := make([]sim.DotaSeat, 0, len(lobby.Players))
+		for _, slot := range lobby.Players {
+			team := "Blue"
+			if slot.Team == 2 {
+				team = "Red"
+			}
+			seats = append(seats, sim.DotaSeat{Owner: slot.PlayerID, Team: team, Hero: slot.Hero, Computer: slot.Controller == "computer"})
+		}
+		lobby.room.world.StartDotaMatch(seats)
+	} else {
+		lobby.room.world.ResetMatchClock()
+	}
 	lobby.room.loading = true
 	lobby.room.running = false
 	lobby.room.loaded = map[int]bool{}
 	lobby.room.startsAt = time.Time{}
+	if dota {
+		lobby.room.broadcastSnapshotLocked(false)
+	}
 	lobby.room.mutex.Unlock()
 	lobby.Started = true
 	lobby.Current = len(lobby.Players)

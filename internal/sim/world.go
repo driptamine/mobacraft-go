@@ -6,6 +6,7 @@ package sim
 
 import (
 	"grimcraft-go/internal/balance"
+	"grimcraft-go/internal/botai"
 	"math"
 	"reflect"
 	"sync"
@@ -25,8 +26,6 @@ const (
 	RangedDamagePerTick = 2.0 // at 10 ticks/s
 	CaptureRadius       = 4.5
 	CaptureRate         = 0.2 // progress per second per squad
-	IncomePerPoint      = 1.0 // req per second per owned point
-	BaseIncome          = 1.0 // req per second
 	EnergyPerThermo     = 1.0 // energy per second per generator
 	MaxRequisition      = 10000.0
 	MaxEnergy           = 10000.0
@@ -34,7 +33,9 @@ const (
 
 var buildCosts = map[string]float64{
 	"hq": 300, "hq-anim": 300, "barracks": 150, "infantry_command": 150, "squad": 100,
+	"scout": 75, "cultist": 50,
 	"builder": 80, "reinforce": 20, "listening_post": 60, "listeningPost": 60,
+	"tau_listening_post": 60, "tau_listening_post_sp": 60,
 	"tower": 120, "thermoGen": 80, "thermo_generator": 80, "towerBase": 80,
 	"apc": 180, "mechanized": 180, "grenadeUpgrade": 30, "plasmaUpgrade": 20,
 	"airfield": 200, "jet": 220, "gunTurret": 100, "plasma_generator": 80,
@@ -48,7 +49,69 @@ func costOf(name string) float64 {
 	return 100
 }
 
-func constructTimeOf(buildingType string) float64 {
+func constructTimeOf(faction, buildingType string) float64 {
+
+	// wikiBuildTime mirrors the Dawn of War build times per faction (seconds).
+	// Types missing here keep the legacy generic timings below.
+	var wikiBuildTime = map[string]map[string]float64{
+		"chaos": {
+			"armoury": 45, "chaos_temple": 57, "desecrated_stronghold": 185,
+			"land_mine": 20, "listening_post": 25, "machine_pit": 45,
+			"plasma_generator": 30, "sacrificial_circle": 35, "thermo_plasma_generator": 65,
+			"chaos_icon": 5, "greater_sacrificial_circle": 12,
+		},
+		"eldar": {
+			"advanced_warp_generator": 65, "aspect_portal": 36, "land_mine": 20,
+			"listening_post": 24, "soul_shrine": 100, "support_platform": 27,
+			"support_portal": 60, "support_portal_ulthwe": 60, "warp_generator": 30,
+			"webway_assembly": 120, "webway_gate": 22,
+		},
+		"ig": {
+			"infantry_command": 36, "listening_post": 30, "mars_pattern": 45,
+			"mechanized": 45, "plasma_generator": 30, "tactica_control": 45,
+			"turret": 48, "mines": 20, "thermo_generator": 6,
+		},
+		"necrons": {
+			"energy_core": 50, "forbidden_archive": 45, "greater_summoning_core": 90,
+			"listening_post": 5, "monolith": 100, "obelisk": 25, "plasma_generator": 45,
+			"summoning_core": 70, "summoning_core_big": 90,
+			"thermoplasma_generator": 120, "turret": 45,
+		},
+		"orks": {
+			"bigger_generator": 60, "da_boyz_hut": 40, "generator": 35,
+			"land_mine": 20, "listening_post": 35, "mek_shop": 12, "pile_o_guns": 60,
+			"settlement": 169, "waagh_banner": 40,
+		},
+		"sob": {
+			"adepta_sororitas_convent": 45, "adeptus_mechanicus_workshop": 40,
+			"ecclesiarchal_chapel": 150, "holy_reliquary_v2": 30, "inferno_turret": 40,
+			"listening_post": 30, "plasma_generator": 30, "pristine_sanctuary": 45,
+			"purgatus_mines": 20, "shrine_of_st_celestine": 8, "thermo_plasma_generator": 60,
+		},
+		"space marines": {
+			"armoury": 45, "barracks": 45, "command_hq": 150, "land_mine": 20,
+			"listening_post": 30, "machine_cult": 40, "orbital_relay": 30,
+			"plasma_generator": 30, "progenitor_temple": 30, "thermo_plasma_generator": 60,
+		},
+		"tau": {
+			"tau_barracks": 35, "tau_build_crane": 8, "tau_hq": 120, "tau_kroot_nest": 45,
+			"tau_listening_post": 25, "tau_listening_post_sp": 25, "listening_post": 25,
+			"tau_plasma_generator": 30, "tau_research": 100, "tau_shrine_of_kauyon": 145,
+			"tau_shrine_of_mont_ka": 8, "tau_shrine_of_purpose": 50,
+			"tau_thermoplasma_generator": 45, "tau_vehicle_building": 60,
+		},
+	}
+
+	// Faction arrives either canonical ('space marines', 'ig', ...) or as the
+	// lobby display name ('Space Marines', 'Imperial Guard', ...).
+	if faction != "" {
+		faction = canonicalFaction(faction)
+	}
+	if perFaction, found := wikiBuildTime[faction]; found {
+		if buildTime, found := perFaction[buildingType]; found {
+			return buildTime
+		}
+	}
 	switch buildingType {
 	case "hq", "hq-anim":
 		return 15
@@ -109,6 +172,7 @@ type Squad struct {
 	ProjectileType string
 	Soldiers       []Soldier
 	ForcedTarget   *int
+	ForcedBuilding *int
 	IdleTime       float64
 	GrenadeCd      float64
 	AutoReinforce  bool
@@ -168,6 +232,8 @@ type Builder struct {
 
 // Building entity (hq, barracks, mechanized, ...).
 type Building struct {
+	HeroBase         bool
+	attackCd         float64
 	ID               int
 	Team             string
 	Faction          string
@@ -267,6 +333,8 @@ type Point struct {
 
 // Player holds per-player economy.
 type Player struct {
+	Computer    bool
+	Difficulty  string
 	ID          int
 	Team        string // "Blue" | "Red"
 	Faction     string
@@ -278,19 +346,23 @@ type Player struct {
 
 // World is a single room's game state.
 type World struct {
-	balanceMod   *balance.Mod
-	mutex        sync.Mutex
-	Tick         uint64
-	Squads       map[int]*Squad
-	Builders     map[int]*Builder
-	Buildings    map[int]*Building
-	Structures   map[int]*Structure
-	Vehicles     map[int]*Vehicle
-	Points       map[int]*Point
-	Players      map[int]*Player
-	Winner       string
-	nextID       int
-	pointsSeeded bool
+	dota            *dotaRound
+	navigation      navigationState
+	computerPlayers map[int]*computerPlayer
+	mapBounds       float64
+	balanceMod      *balance.Mod
+	mutex           sync.Mutex
+	Tick            uint64
+	Squads          map[int]*Squad
+	Builders        map[int]*Builder
+	Buildings       map[int]*Building
+	Structures      map[int]*Structure
+	Vehicles        map[int]*Vehicle
+	Points          map[int]*Point
+	Players         map[int]*Player
+	Winner          string
+	nextID          int
+	pointsSeeded    bool
 }
 
 // NewWorld returns an empty world.
@@ -336,7 +408,8 @@ func (world *World) ensurePlayerLocked(owner int, team, faction string) *Player 
 	if team != "Red" {
 		team = "Blue"
 	}
-	currentPlayer := &Player{ID: owner, Team: team, Faction: faction, Requisition: 1500, Energy: 100, Research: map[string]bool{}}
+	startingRequisition, startingEnergy := initialResources(faction)
+	currentPlayer := &Player{ID: owner, Team: team, Faction: faction, Requisition: startingRequisition, Energy: startingEnergy, Research: map[string]bool{}}
 	world.Players[owner] = currentPlayer
 	return currentPlayer
 }
@@ -460,12 +533,16 @@ func (world *World) MuLockTestKillSoldier(squadID int) {
 func (world *World) PlaceBuilding(owner int, builderID int, buildingType string, position protocol.Vec3) (int, bool) {
 	world.mutex.Lock()
 	defer world.mutex.Unlock()
+	return world.placeBuildingLocked(owner, builderID, buildingType, position)
+}
+
+func (world *World) placeBuildingLocked(owner int, builderID int, buildingType string, position protocol.Vec3) (int, bool) {
 	player := world.playerOf(owner)
 	if player == nil {
 		return 0, false
 	}
 	var listeningPoint *Point
-	if buildingType == "listening_post" && player.Faction == "ig" {
+	if botai.IsListeningPost(buildingType) {
 		for _, point := range world.Points {
 			if point.Owner == player.Team && dist(point.Pos, position) < 2 && !point.HasListeningPost && point.ListeningPostEntityID == nil {
 				listeningPoint = point
@@ -482,9 +559,8 @@ func (world *World) PlaceBuilding(owner int, builderID int, buildingType string,
 	}
 	player.Requisition -= cost
 	entityID := world.allocID()
-	switch buildingType {
-	case "tower", "turret", "towerBase", "gunTurret", "thermoGen", "thermo_generator",
-		"plasma_generator", "tactica_control", "mines":
+	switch {
+	case buildingType == "tower" || buildingType == "turret" || buildingType == "towerBase" || buildingType == "gunTurret" || botai.IsGenerator(buildingType) || buildingType == "tactica_control" || buildingType == "mines":
 		attackRange, rate := 0.0, 0.0
 		if buildingType == "tower" || buildingType == "turret" {
 			attackRange, rate = 28, 0.8
@@ -495,7 +571,7 @@ func (world *World) PlaceBuilding(owner int, builderID int, buildingType string,
 		}
 		world.Structures[entityID] = &Structure{ID: entityID, Team: player.Team, Faction: player.Faction, Owner: owner,
 			Type: buildingType, Pos: position, HP: 300, MaxHP: 300, Constructing: true, RequiresWorker: true,
-			ConstructTime: constructTimeOf(buildingType), AttackRange: attackRange, AttackRate: rate}
+			ConstructTime: constructTimeOf(player.Faction, buildingType), AttackRange: attackRange, AttackRate: rate}
 		if structure := world.Structures[entityID]; hasAnimatedConstruction(structure.Faction, structure.Type) {
 			structure.DeliveryTime = constructionDeliveryTime
 		}
@@ -506,7 +582,7 @@ func (world *World) PlaceBuilding(owner int, builderID int, buildingType string,
 		} else if buildingType == "mechanized" {
 			healthPoints = 800
 		}
-		constructionTime := constructTimeOf(buildingType)
+		constructionTime := constructTimeOf(player.Faction, buildingType)
 		isConstructing := constructionTime > 0
 		world.Buildings[entityID] = &Building{ID: entityID, Team: player.Team, Faction: player.Faction, Owner: owner,
 			Type: buildingType, Pos: position, HP: healthPoints, MaxHP: healthPoints, Constructing: isConstructing, RequiresWorker: true,
@@ -540,11 +616,15 @@ func (world *World) PlaceBuilding(owner int, builderID int, buildingType string,
 func (world *World) TrainUnit(owner int, buildingID int, unitType string) bool {
 	world.mutex.Lock()
 	defer world.mutex.Unlock()
+	return world.trainUnitLocked(owner, buildingID, unitType)
+}
+
+func (world *World) trainUnitLocked(owner int, buildingID int, unitType string) bool {
 	player := world.playerOf(owner)
 	if player == nil {
 		return false
 	}
-	cost, total := unitCostTime(unitType)
+	cost, total := unitCostTime(player, unitType)
 	if player.Requisition < cost {
 		return false
 	}
@@ -573,7 +653,7 @@ func (world *World) TrainUnit(owner int, buildingID int, unitType string) bool {
 	return false
 }
 
-func unitCostTime(unitType string) (float64, float64) {
+func unitCostTime(player *Player, unitType string) (float64, float64) {
 	if entry, found := imperialGuardVehicleProduction[unitType]; found {
 		return entry.cost, entry.time
 	}
@@ -582,7 +662,15 @@ func unitCostTime(unitType string) (float64, float64) {
 		return 80, 2
 	case "jet":
 		return 220, 12
+	case "scout":
+		return 75, 12
+	case "cultist":
+		return 50, 12.5
 	case "squad":
+		// Wiki squad build times; other races keep the generic 3s.
+		if player != nil && (player.Faction == "space marines" || player.Faction == "chaos") {
+			return 100, 26.4
+		}
 		return 100, 3
 	default:
 		if unitCost, isValid := buildCosts[unitType]; isValid {
@@ -596,6 +684,10 @@ func unitCostTime(unitType string) (float64, float64) {
 func (world *World) QueueReinforceAt(owner int, squadID int, formationIndex int) bool {
 	world.mutex.Lock()
 	defer world.mutex.Unlock()
+	return world.queueReinforceAtLocked(owner, squadID, formationIndex)
+}
+
+func (world *World) queueReinforceAtLocked(owner int, squadID int, formationIndex int) bool {
 	squad, isValid := world.Squads[squadID]
 	if !isValid || squad.Owner != owner {
 		return false
@@ -741,54 +833,16 @@ func (world *World) Advance(deltaTime float64) {
 	world.tickActionTimersLocked(deltaTime)
 	world.updateMeleeContactsLocked()
 	world.ensurePointsLocked()
-	// computer AI: chase nearest enemy
-	for _, squad := range world.Squads {
-		if !squad.Computer {
-			continue
-		}
-		var target *Squad
-		closestDistance := math.Inf(1)
-		for _, other := range world.Squads {
-			if other.Team == squad.Team || aliveCount(other) == 0 {
-				continue
-			}
-			if currentDistance := dist(squad.Pos, other.Pos); currentDistance < closestDistance {
-				closestDistance = currentDistance
-				target = other
-			}
-		}
-		if target != nil {
-			entityID := target.ID
-			squad.ForcedTarget = &entityID
-			squad.Stopped = false
-		}
+	if world.dota == nil {
+		world.advanceComputersLocked(deltaTime)
+	} else {
+		world.advanceDotaLocked(deltaTime)
 	}
+	world.refreshNavigationLocked()
 	// income
 	for _, player := range world.Players {
-		owned := 0
-		for _, point := range world.Points {
-			teamOf := ""
-			if point.Owner == "Blue" {
-				teamOf = "Blue"
-			} else if point.Owner == "Red" {
-				teamOf = "Red"
-			}
-			if teamOf == player.Team && teamOf != "" {
-				owned++
-				if point.HasListeningPost {
-					owned += point.LPTier
-				}
-			}
-		}
-		player.Requisition = math.Min(MaxRequisition, player.Requisition+(BaseIncome+float64(owned)*IncomePerPoint)*deltaTime)
-		generatorEntityID := 0
-		for _, structure := range world.Structures {
-			if structure.Owner == player.ID && !structure.Constructing &&
-				(structure.Type == "thermoGen" || structure.Type == "thermo_generator" || structure.Type == "plasma_generator") {
-				generatorEntityID++
-			}
-		}
-		player.Energy = math.Min(MaxEnergy, player.Energy+float64(generatorEntityID)*EnergyPerThermo*deltaTime)
+		player.Requisition = math.Min(MaxRequisition, player.Requisition+world.requisitionRateLocked(player)/resourceRateSeconds*deltaTime)
+		player.Energy = math.Min(MaxEnergy, player.Energy+world.powerRateLocked(player)/resourceRateSeconds*deltaTime)
 	}
 	// builders movement + build progress
 	for _, builder := range world.Builders {
@@ -810,13 +864,9 @@ func (world *World) Advance(deltaTime float64) {
 		}
 		if builder.MoveTarget != nil {
 			target := *builder.MoveTarget
-			if builder.BuildTarget != nil {
-				if building := world.Buildings[*builder.BuildTarget]; building != nil {
-					target = constructionApproachWaypoint(builder.Pos, target, structureFootprint(building.Faction, building.Type, true, building.Pos))
-				} else if structure := world.Structures[*builder.BuildTarget]; structure != nil {
-					target = constructionApproachWaypoint(builder.Pos, target, structureFootprint(structure.Faction, structure.Type, true, structure.Pos))
-				}
-			}
+			target, destination := world.groundWaypointLocked(builder.ID, builder.Pos, target, .5)
+			builder.MoveTarget = &destination
+
 			distance := dist(builder.Pos, target)
 			step := builder.Speed * deltaTime
 			if step <= 0 {
@@ -824,7 +874,7 @@ func (world *World) Advance(deltaTime float64) {
 			}
 			if distance <= math.Max(step, 0.3) {
 				builder.Pos.X, builder.Pos.Z = target.X, target.Z
-				if dist(target, *builder.MoveTarget) < .01 {
+				if dist(target, destination) < .01 {
 					builder.MoveTarget = nil
 				}
 				builder.moved = true
@@ -889,7 +939,19 @@ func (world *World) Advance(deltaTime float64) {
 			if building.Queue[0].Progress >= building.Queue[0].Total {
 				item := building.Queue[0]
 				building.Queue = building.Queue[1:]
-				world.spawnProductionLocked(building.Team, building.Owner, item.Type, building.Pos, building.Rally)
+				world.spawnProductionLocked(building.Team, building.Owner, item.Type, building.Pos, building.Rally, building.Faction, building.Type)
+			}
+		}
+		// Fortified listening posts (tier 2+) fire their mounted bolters.
+		if !building.Constructing && !building.PendingWorker && botai.IsListeningPost(building.Type) && building.StrategicPointID != nil {
+			if point := world.Points[*building.StrategicPointID]; point != nil && point.LPTier >= 2 {
+				building.attackCd = math.Max(0, building.attackCd-deltaTime)
+				if building.attackCd <= 0 {
+					if targetID, isValid := world.closestEnemySoldier(building.Pos, building.Team, 28); isValid {
+						world.damageSoldier(targetID, 12, building.Owner)
+						building.attackCd = 1
+					}
+				}
 			}
 		}
 	}
@@ -938,6 +1000,7 @@ func (world *World) Advance(deltaTime float64) {
 			}
 		}
 	}
+	world.refreshNavigationLocked()
 	for _, vehicle := range world.Vehicles {
 		if vehicle.Constructing {
 			vehicle.Progress += deltaTime
@@ -951,21 +1014,35 @@ func (world *World) Advance(deltaTime float64) {
 			if vehicle.Queue[0].Progress >= vehicle.Queue[0].Total {
 				item := vehicle.Queue[0]
 				vehicle.Queue = vehicle.Queue[1:]
-				world.spawnProductionLocked(vehicle.Team, vehicle.Owner, item.Type, vehicle.Pos, vehicle.Rally)
+				world.spawnProductionLocked(vehicle.Team, vehicle.Owner, item.Type, vehicle.Pos, vehicle.Rally, vehicle.Faction, vehicle.Kind)
 			}
 		}
 		if vehicle.MoveOrder != nil {
 			target := *vehicle.MoveOrder
-			distance := dist(vehicle.Pos, target)
-			step := 8 * deltaTime
-			if distance <= math.Max(step, 0.5) {
-				vehicle.Pos.X, vehicle.Pos.Z = target.X, target.Z
-				vehicle.MoveOrder = nil
-				vehicle.moved = true
+			destination := target
+			grounded := vehicle.Kind != "jet" && vehicle.Kind != "airfield"
+			radius := 1.0
+			if vehicle.Kind == "apc" {
+				radius = 1.2
+			}
+			if grounded {
+				target, destination = world.groundWaypointLocked(vehicle.ID, vehicle.Pos, target, radius)
+				vehicle.MoveOrder = &destination
+			}
+			previous := vehicle.Pos
+			if grounded {
+				vehicle.Pos = world.groundStepLocked(vehicle.Pos, target, 8*deltaTime, radius)
 			} else {
-				vehicle.Pos.X += (target.X - vehicle.Pos.X) / distance * step
-				vehicle.Pos.Z += (target.Z - vehicle.Pos.Z) / distance * step
-				vehicle.moved = true
+				distance := dist(vehicle.Pos, target)
+				if distance > 0 {
+					fraction := math.Min(1, 8*deltaTime/distance)
+					vehicle.Pos.X += (target.X - vehicle.Pos.X) * fraction
+					vehicle.Pos.Z += (target.Z - vehicle.Pos.Z) * fraction
+				}
+			}
+			vehicle.moved = dist(previous, vehicle.Pos) > 1e-9
+			if dist(vehicle.Pos, destination) <= .3 {
+				vehicle.MoveOrder = nil
 			}
 		}
 	}
@@ -1035,27 +1112,26 @@ func (world *World) Advance(deltaTime float64) {
 		}
 		// Movement toward move order.
 		if squad.MoveOrder != nil && !squad.Stopped && !(squad.AttackMove && squad.ForcedTarget != nil) {
-			target := *squad.MoveOrder
-			distance := dist(squad.Pos, target)
-			step := squad.Speed * deltaTime
-			if distance <= math.Max(step, ArriveEpsilon) {
-				squad.Pos.X, squad.Pos.Z = target.X, target.Z
-				squad.MoveOrder = nil
-				squad.Stopped = true
-				squad.IdleTime = 0
-				squad.moved = true
-			} else {
-				currentDirectionX := (target.X - squad.Pos.X) / distance
-				currentDirectionZ := (target.Z - squad.Pos.Z) / distance
-				squad.Pos.X += currentDirectionX * step
-				squad.Pos.Z += currentDirectionZ * step
-				if math.Abs(squad.Facing.X-currentDirectionX) > 1e-6 || math.Abs(squad.Facing.Z-currentDirectionZ) > 1e-6 {
-					squad.Facing.X, squad.Facing.Z = currentDirectionX, currentDirectionZ
+			target, destination := world.groundWaypointLocked(squad.ID, squad.Pos, *squad.MoveOrder, .5)
+			squad.MoveOrder = &destination
+			previous := squad.Pos
+			squad.Pos = world.groundStepLocked(squad.Pos, target, squad.Speed*deltaTime, .5)
+			moved := dist(previous, squad.Pos)
+			if moved > 1e-9 {
+				directionX, directionZ := (squad.Pos.X-previous.X)/moved, (squad.Pos.Z-previous.Z)/moved
+				if math.Abs(squad.Facing.X-directionX) > 1e-6 || math.Abs(squad.Facing.Z-directionZ) > 1e-6 {
+					squad.Facing.X, squad.Facing.Z = directionX, directionZ
 					squad.facingChanged = true
 				}
 				squad.moved = true
 				squad.IdleTime = 0
 			}
+			if dist(squad.Pos, destination) <= ArriveEpsilon {
+				squad.Pos = world.groundStepLocked(squad.Pos, destination, ArriveEpsilon, .5)
+				squad.MoveOrder = nil
+				squad.Stopped = true
+			}
+
 		} else {
 			squad.IdleTime += deltaTime
 		}
@@ -1112,13 +1188,15 @@ func (world *World) Advance(deltaTime float64) {
 				}
 				if distance > stopRange && distance > 0 && (squad.MoveOrder == nil || squad.AttackMove) {
 					step := math.Min(squad.Speed*deltaTime, distance-stopRange*.85)
-					chaseDirectionX, chaseDirectionZ := (target.Pos.X-squad.Pos.X)/distance, (target.Pos.Z-squad.Pos.Z)/distance
-					squad.Pos.X += chaseDirectionX * step
-					squad.Pos.Z += chaseDirectionZ * step
-					squad.Facing.X = chaseDirectionX
-					squad.Facing.Z = chaseDirectionZ
-					squad.moved = true
-					squad.facingChanged = true
+					waypoint, _ := world.groundWaypointLocked(squad.ID, squad.Pos, target.Pos, .5)
+					previous := squad.Pos
+					squad.Pos = world.groundStepLocked(squad.Pos, waypoint, step, .5)
+					if moved := dist(previous, squad.Pos); moved > 1e-9 {
+						squad.Facing.X = (squad.Pos.X - previous.X) / moved
+						squad.Facing.Z = (squad.Pos.Z - previous.Z) / moved
+						squad.moved = true
+						squad.facingChanged = true
+					}
 				}
 				distance = dist(squad.Pos, target.Pos)
 				if distance <= squad.AttackRange {
@@ -1153,6 +1231,48 @@ func (world *World) Advance(deltaTime float64) {
 							}
 						}
 						break
+					}
+				}
+			}
+		}
+		if squad.ForcedBuilding != nil {
+			building, buildingFound := world.Buildings[*squad.ForcedBuilding]
+			structure, structureFound := world.Structures[*squad.ForcedBuilding]
+			if !buildingFound && !structureFound {
+				squad.ForcedBuilding = nil
+			} else {
+				var targetPos protocol.Vec3
+				var targetTeam string
+				if buildingFound {
+					targetPos, targetTeam = building.Pos, building.Team
+				} else {
+					targetPos, targetTeam = structure.Pos, structure.Team
+				}
+				if targetTeam == squad.Team {
+					squad.ForcedBuilding = nil
+				} else {
+					stopRange := squad.AttackRange + 4
+					distance := dist(squad.Pos, targetPos)
+					if distance > stopRange && distance > 0 && (squad.MoveOrder == nil || squad.AttackMove) {
+						step := math.Min(squad.Speed*deltaTime, distance-stopRange*.85)
+						waypoint, _ := world.groundWaypointLocked(squad.ID, squad.Pos, targetPos, .5)
+						previous := squad.Pos
+						squad.Pos = world.groundStepLocked(squad.Pos, waypoint, step, .5)
+						if moved := dist(previous, squad.Pos); moved > 1e-9 {
+							squad.Facing.X = (squad.Pos.X - previous.X) / moved
+							squad.Facing.Z = (squad.Pos.Z - previous.Z) / moved
+							squad.moved = true
+							squad.facingChanged = true
+						}
+					}
+					distance = dist(squad.Pos, targetPos)
+					if distance <= squad.AttackRange+4 {
+						if length := math.Hypot(targetPos.X-squad.Pos.X, targetPos.Z-squad.Pos.Z); length > 0 {
+							squad.Facing.X = (targetPos.X - squad.Pos.X) / length
+							squad.Facing.Z = (targetPos.Z - squad.Pos.Z) / length
+							squad.facingChanged = true
+						}
+						world.damageBuildingLocked(*squad.ForcedBuilding, RangedDamagePerTick, squad.Owner)
 					}
 				}
 			}
@@ -1277,7 +1397,33 @@ func (world *World) finishBuilderLocked(builder *Builder) {
 	}
 }
 
-func (world *World) spawnProductionLocked(team string, owner int, unitType string, targetPosition protocol.Vec3, rally *protocol.Vec3) {
+// Eight exit gates around a production structure (E, NE, N, NW, W, SW, S,
+// SE): the rally direction snaps to the nearest one so fresh units walk out
+// toward the rally point instead of piling up on one fixed side.
+func spawnGateOffset(deltaX, deltaZ float64) (float64, float64) {
+	if deltaX == 0 && deltaZ == 0 {
+		return -1, 0
+	}
+	dirs := [8][2]float64{{1, 0}, {math.Sqrt2 / 2, math.Sqrt2 / 2}, {0, 1}, {-math.Sqrt2 / 2, math.Sqrt2 / 2}, {-1, 0}, {-math.Sqrt2 / 2, -math.Sqrt2 / 2}, {0, -1}, {math.Sqrt2 / 2, -math.Sqrt2 / 2}}
+	index := int(math.Round(math.Atan2(deltaZ, deltaX) / (math.Pi / 4)))
+	index = ((index % 8) + 8) % 8
+	return dirs[index][0], dirs[index][1]
+}
+
+func productionSpawnPoint(faction, buildingType string, position protocol.Vec3, rally *protocol.Vec3) protocol.Vec3 {
+	bounds := structureFootprint(faction, buildingType, false, position)
+	extentX := bounds.MaxX - bounds.MinX
+	extentZ := bounds.MaxZ - bounds.MinZ
+	radius := math.Max(math.Max(extentX, extentZ), 4)/2 + 3
+	if rally == nil {
+		return protocol.Vec3{X: position.X - 6, Z: position.Z}
+	}
+	gateX, gateZ := spawnGateOffset(rally.X-position.X, rally.Z-position.Z)
+	return protocol.Vec3{X: position.X + gateX*radius, Z: position.Z + gateZ*radius}
+}
+
+func (world *World) spawnProductionLocked(team string, owner int, unitType string, targetPosition protocol.Vec3, rally *protocol.Vec3, producerFaction, producerType string) {
+	spawn := productionSpawnPoint(producerFaction, producerType, targetPosition, rally)
 	if entry, found := imperialGuardVehicleProduction[unitType]; found && world.playerOf(owner) != nil && world.playerOf(owner).Faction == "ig" {
 		vehicleID := world.allocID()
 		projectileType := "Bullet"
@@ -1287,24 +1433,24 @@ func (world *World) spawnProductionLocked(team string, owner int, unitType strin
 		world.Vehicles[vehicleID] = &Vehicle{ID: vehicleID, Kind: "vehicle", Team: team, Owner: owner, Faction: "ig",
 			Name: unitType, Model: "models/ig/vehicles/" + unitType + ".glb",
 			Icon: "assets/icons/Imperial Guard/Units/Vehicles/" + entry.icon, ProjectileType: projectileType,
-			Pos: protocol.Vec3{X: targetPosition.X - 6, Z: targetPosition.Z}, HP: 500, MaxHP: 500, MoveOrder: rally}
+			Pos: spawn, HP: 500, MaxHP: 500, MoveOrder: rally}
 		return
 	}
 	switch unitType {
 	case "builder":
 		builderID := world.allocID()
-		world.Builders[builderID] = &Builder{ID: builderID, Team: team, Owner: owner, Pos: protocol.Vec3{X: targetPosition.X - 6, Z: targetPosition.Z},
-			HP: 60, MaxHP: 60, Speed: 7, Stance: "stand", MoveTarget: rally}
+		world.Builders[builderID] = &Builder{ID: builderID, Team: team, Owner: owner, Pos: spawn,
+			HP: 60, MaxHP: 60, Speed: 7, Stance: "stand", MoveTarget: rally, Faction: world.Players[owner].Faction}
 	case "jet":
 		jetID := world.allocID()
-		position := protocol.Vec3{X: targetPosition.X - 6, Z: targetPosition.Z}
+		position := spawn
 		moveOrder := rally
 		world.Vehicles[jetID] = &Vehicle{ID: jetID, Kind: "jet", Team: team, Owner: owner, Pos: position,
 			HP: 200, MaxHP: 200, MoveOrder: moveOrder}
 	case "apc":
 		transportID := world.allocID()
 		world.Vehicles[transportID] = &Vehicle{ID: transportID, Kind: "apc", Team: team, Owner: owner,
-			Pos: protocol.Vec3{X: targetPosition.X - 6, Z: targetPosition.Z}, HP: 400, MaxHP: 400, MoveOrder: rally}
+			Pos: spawn, HP: 400, MaxHP: 400, MoveOrder: rally}
 	case "airfield":
 		airfieldID := world.allocID()
 		world.Vehicles[airfieldID] = &Vehicle{ID: airfieldID, Kind: "airfield", Team: team, Owner: owner,
@@ -1313,8 +1459,8 @@ func (world *World) spawnProductionLocked(team string, owner int, unitType strin
 		// default: infantry squad
 		player := world.ensurePlayerLocked(owner, team, "")
 		squadID := world.allocID()
-		squad := &Squad{ID: squadID, Team: team, Owner: owner, UnitType: unitType, Faction: player.Faction,
-			Pos: protocol.Vec3{X: targetPosition.X - 6, Z: targetPosition.Z}, Facing: protocol.Vec3{X: 1},
+		squad := &Squad{ID: squadID, Team: team, Owner: owner, UnitType: unitType, Faction: player.Faction, Computer: player.Computer,
+			Pos: spawn, Facing: protocol.Vec3{X: 1},
 			Speed: squadMovementSpeed(player.Faction), AttackRange: DefaultAttackRange, DetectRange: DefaultDetectRange,
 			Stopped: true, AttackMode: "ranged", Stance: "ranged", ProjectileType: "Bullet",
 			Soldiers: []Soldier{{HP: 100, Alive: true, FormIdx: 1, MaxHP: 100}, {HP: 100, Alive: true, FormIdx: 2, MaxHP: 100}, {HP: 100, Alive: true, FormIdx: 3, MaxHP: 100}, {HP: 100, Alive: true, FormIdx: 4, MaxHP: 100}, {HP: 100, Alive: true, FormIdx: 5, MaxHP: 100}},
@@ -1336,6 +1482,10 @@ func (world *World) spawnProductionLocked(team string, owner int, unitType strin
 
 func (world *World) updateWinnerLocked() {
 	if world.Winner != "" {
+		return
+	}
+	if world.dota != nil {
+		world.updateDotaWinnerLocked()
 		return
 	}
 	blueAlive, redAlive := false, false
@@ -1381,6 +1531,7 @@ func (world *World) MoveSquads(playerID int, squadIDs []int, target protocol.Vec
 			squad.MoveOrder = &order
 			squad.Stopped = false
 			squad.ForcedTarget = nil
+			squad.ForcedBuilding = nil
 			squad.CaptureOrderSP = nil
 			moved = append(moved, squadID)
 			continue
@@ -1413,6 +1564,7 @@ func (world *World) MoveUnits(playerID int, entityIDs []int, target protocol.Vec
 			squad.MoveOrder = &squadDestination
 			squad.Stopped = false
 			squad.ForcedTarget = nil
+			squad.ForcedBuilding = nil
 			squad.CaptureOrderSP = pointID
 			squad.AttackMove = false
 			squad.autoTarget = false
@@ -1448,6 +1600,7 @@ func (world *World) StopSquads(playerID int, squadIDs []int) (stopped, rejected 
 			squad.AttackMove = false
 			squad.AutoChase = false
 			squad.ForcedTarget = nil
+			squad.ForcedBuilding = nil
 			squad.CaptureOrderSP = nil
 			stopped = append(stopped, squadID)
 			continue
@@ -1468,6 +1621,7 @@ func (world *World) StopUnits(playerID int, entityIDs []int) (stopped, rejected 
 			squad.AttackMove = false
 			squad.AutoChase = false
 			squad.ForcedTarget = nil
+			squad.ForcedBuilding = nil
 			squad.CaptureOrderSP = nil
 			stopped = append(stopped, entityID)
 			continue
@@ -1504,6 +1658,7 @@ func (world *World) Attack(playerID int, attackerIDs []int, targetSquad int) (ac
 		}
 		targetID := targetSquad
 		squad.ForcedTarget = &targetID
+		squad.ForcedBuilding = nil
 		squad.autoTarget = false
 		squad.AttackMove = false
 		squad.MoveOrder = nil
@@ -1511,6 +1666,92 @@ func (world *World) Attack(playerID int, attackerIDs []int, targetSquad int) (ac
 		acceptedIDs = append(acceptedIDs, attackerID)
 	}
 	return acceptedIDs, rejected
+}
+
+// AttackBuilding orders squads to raze an enemy building or structure.
+func (world *World) AttackBuilding(playerID int, attackerIDs []int, targetBuilding int) (acceptedIDs, rejected []int) {
+	world.mutex.Lock()
+	defer world.mutex.Unlock()
+	building, buildingFound := world.Buildings[targetBuilding]
+	structure, structureFound := world.Structures[targetBuilding]
+	if !buildingFound && !structureFound {
+		return nil, attackerIDs
+	}
+	targetTeam := ""
+	if buildingFound {
+		targetTeam = building.Team
+	} else {
+		targetTeam = structure.Team
+	}
+	for _, attackerID := range attackerIDs {
+		squad, found := world.Squads[attackerID]
+		if !found || squad.Owner != playerID || targetTeam == squad.Team {
+			rejected = append(rejected, attackerID)
+			continue
+		}
+		targetID := targetBuilding
+		squad.ForcedBuilding = &targetID
+		squad.ForcedTarget = nil
+		squad.autoTarget = false
+		squad.AttackMove = false
+		squad.MoveOrder = nil
+		squad.CaptureOrderSP = nil
+		squad.CapturingSP = nil
+		squad.Stopped = false
+		acceptedIDs = append(acceptedIDs, attackerID)
+	}
+	return acceptedIDs, rejected
+}
+
+// damageBuildingLocked chips a building or structure and demolishes it at
+// zero HP, unlinking listening posts and clearing orders that reference it.
+func (world *World) damageBuildingLocked(buildingID int, amount float64, killerOwner int) {
+	destroyed := false
+	if building, found := world.Buildings[buildingID]; found {
+		building.HP -= amount
+		destroyed = building.HP <= 0
+	} else if structure, found := world.Structures[buildingID]; found {
+		structure.HP -= amount
+		destroyed = structure.HP <= 0
+	} else {
+		return
+	}
+	if destroyed {
+		if killer := world.playerOf(killerOwner); killer != nil {
+			killer.Kills++
+		}
+		world.destroyBuildingLocked(buildingID)
+	}
+}
+
+// destroyBuildingLocked removes a razed building or structure and releases
+// everything tied to it: listening-post links, worker orders and squads
+// ordered to attack it.
+func (world *World) destroyBuildingLocked(buildingID int) {
+	if _, found := world.Buildings[buildingID]; found {
+		delete(world.Buildings, buildingID)
+	} else if _, found := world.Structures[buildingID]; found {
+		delete(world.Structures, buildingID)
+	} else {
+		return
+	}
+	for _, point := range world.Points {
+		if point.ListeningPostEntityID != nil && *point.ListeningPostEntityID == buildingID {
+			point.ListeningPostEntityID = nil
+			point.HasListeningPost = false
+			point.LPTier = 0
+		}
+	}
+	for _, builder := range world.Builders {
+		if builder.BuildTarget != nil && *builder.BuildTarget == buildingID {
+			builder.BuildTarget = nil
+		}
+	}
+	for _, squad := range world.Squads {
+		if squad.ForcedBuilding != nil && *squad.ForcedBuilding == buildingID {
+			squad.ForcedBuilding = nil
+		}
+	}
 }
 
 // UnitCommand handles schema-2 move/attackmove/melee with optional enemy.
@@ -1990,6 +2231,7 @@ func nonNullList(value any) any {
 }
 
 func (world *World) snapshotV2Locked() map[string]any {
+	world.refreshNavigationLocked()
 	entities := []any{}
 	emit := func(entityID int, kind string, component map[string]any, position protocol.Vec3, facing protocol.Vec3, owner int) {
 		yaw := yawOf(facing)
@@ -2040,6 +2282,10 @@ func (world *World) snapshotV2Locked() map[string]any {
 			"soldiers": soldierIDs, "forcedTarget": squad.ForcedTarget,
 			"autoReinforce": squad.AutoReinforce, "attackMode": squad.AttackMode, "stance": squad.Stance,
 		}
+		if world.dota != nil {
+			squadComponent["maxSquadSize"] = 1
+			squadComponent["dotaHero"] = ValidDotaHero(squad.UnitType)
+		}
 		emit(squadID, "squad", squadComponent, squad.Pos, squad.Facing, squad.Owner)
 		// soldier entities
 		for soldierIndex := range squad.Soldiers {
@@ -2053,6 +2299,10 @@ func (world *World) snapshotV2Locked() map[string]any {
 			formationOffsetX := float64((soldierIndex%3)-1) * 2.2
 			formationOffsetZ := float64((soldierIndex/3)-1) * 2.2
 			soldierPosition := protocol.Vec3{X: squad.Pos.X + formationOffsetX, Z: squad.Pos.Z + formationOffsetZ}
+			if world.dota != nil {
+				soldierPosition = squad.Pos
+			}
+			soldierPosition = projectGroundGoal(soldierPosition, squad.Pos, world.groundBoundsLocked(.5))
 			maximumHealthPoints := soldier.MaxHP
 			if maximumHealthPoints == 0 {
 				maximumHealthPoints = 100
@@ -2089,7 +2339,7 @@ func (world *World) snapshotV2Locked() map[string]any {
 			rally = vecBox(*building.Rally)
 		}
 		buildingComponent := map[string]any{
-			"type": building.Type, "position": vecBox(building.Pos), "team": lowerTeam(building.Team), "faction": building.Faction,
+			"type": building.Type, "heroBase": building.HeroBase, "position": vecBox(building.Pos), "team": lowerTeam(building.Team), "faction": building.Faction,
 			"hp": building.HP, "maxHp": building.MaxHP, "queue": nonNullList(building.Queue),
 			"researchQueue": nonNullList(building.Research), "addons": nonNullList(building.Addons), "tier": building.Tier,
 			"rallyPoint": rally, "constructing": building.Constructing,
@@ -2174,6 +2424,7 @@ func (world *World) snapshotV2Locked() map[string]any {
 		players = append(players, map[string]any{
 			"id": player.ID, "team": teamLower, "faction": player.Faction,
 			"requisition": player.Requisition, "energy": player.Energy,
+			"requisitionRate": world.requisitionRateLocked(player), "powerRate": world.powerRateLocked(player),
 			"kills": player.Kills, "research": completedResearch,
 		})
 	}

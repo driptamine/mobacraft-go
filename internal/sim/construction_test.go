@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"math"
 	"testing"
 
 	"grimcraft-go/internal/protocol"
@@ -168,7 +169,7 @@ func TestAdditionalIGConstructionSites(testCase *testing.T) {
 
 func TestStartingHeadquartersRemainReady(testCase *testing.T) {
 	world := NewWorld()
-	world.SpawnLobbySquad("Blue", 1, "ig", "Arena")
+	world.SpawnLobbySeat("Blue", 1, "ig", "Arena")
 	for _, building := range world.Buildings {
 		if building.Type == "hq" {
 			if building.Constructing || building.PendingWorker || building.DeliveryTime != 0 || building.HP != 2000 {
@@ -201,5 +202,46 @@ func TestUnanimatedSiteRequiresWorker(testCase *testing.T) {
 	world.Advance(2)
 	if site.Progress != .5 || !site.PendingWorker {
 		testCase.Fatal("unanimated site continued constructing without a worker")
+	}
+}
+
+func TestSpawnGatesFaceRallyPoint(testCase *testing.T) {
+	directions := []struct {
+		x, z, wantX, wantZ float64
+	}{
+		{10, 0, 1, 0},
+		{-10, 0, -1, 0},
+		{0, 10, 0, 1},
+		{0, -10, 0, -1},
+		{10, 10, 0.7071067811865476, 0.7071067811865476},
+		{-10, 10, -0.7071067811865476, 0.7071067811865476},
+		{10, -10, 0.7071067811865476, -0.7071067811865476},
+		{-10, -10, -0.7071067811865476, -0.7071067811865476},
+		{3, 1, 1, 0},
+		{1, 3, 0, 1},
+	}
+	for _, direction := range directions {
+		gotX, gotZ := spawnGateOffset(direction.x, direction.z)
+		if math.Abs(gotX-direction.wantX) > 1e-9 || math.Abs(gotZ-direction.wantZ) > 1e-9 {
+			testCase.Fatalf("gate(%v,%v) = (%v,%v), want (%v,%v)", direction.x, direction.z, gotX, gotZ, direction.wantX, direction.wantZ)
+		}
+	}
+	gotX, gotZ := spawnGateOffset(0, 0)
+	if gotX != -1 || gotZ != 0 {
+		testCase.Fatalf("zero vector must keep the legacy west gate, got (%v,%v)", gotX, gotZ)
+	}
+	rally := protocol.Vec3{X: 100, Z: 0}
+	spawned := productionSpawnPoint("ig", "infantry_command", protocol.Vec3{X: 0, Z: 0}, &rally)
+	if spawned.X <= 0 || spawned.Z != 0 {
+		testCase.Fatalf("east rally must spawn east of the structure, got %+v", spawned)
+	}
+	rally = protocol.Vec3{X: 0, Z: -100}
+	spawned = productionSpawnPoint("ig", "infantry_command", protocol.Vec3{X: 0, Z: 0}, &rally)
+	if spawned.Z >= 0 || spawned.X != 0 {
+		testCase.Fatalf("north rally must spawn north of the structure, got %+v", spawned)
+	}
+	spawned = productionSpawnPoint("ig", "infantry_command", protocol.Vec3{X: 0, Z: 0}, nil)
+	if spawned.X != -6 || spawned.Z != 0 {
+		testCase.Fatalf("missing rally must keep the legacy west offset, got %+v", spawned)
 	}
 }

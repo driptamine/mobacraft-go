@@ -1,6 +1,6 @@
-# grimcraft-go — authoritative multiplayer backend for Grimcraft RTS
+# mobacraft-go
 
-Go server for the [GrimCraft-main](../GrimCraft-main) frontend
+Go server for the [mobacraft](../mobacraft) frontend
 (`src/net/multiplayer.ts`). One process hosts **many lobbies, one room (game) each**.
 
 ## Protocol (matches `src/net/multiplayer.ts`)
@@ -11,8 +11,7 @@ Go server for the [GrimCraft-main](../GrimCraft-main) frontend
   Server answers on a uni stream with framed
   `{"Session"…}`, `{"Snapshot"…}`, `{"Delta"…}`, `{"CmdAck"…}`.
 - **WebSocket** `ws://<host>:8080/join?lobby=<id>&team=Blue&username=…&faction=…` —
-  same JSON messages, unframed, one text message each. Available for development clients and protocol tests; the multiplayer UI
-  uses WebTransport by default.
+  same JSON messages, unframed, one text message each. The Multiplayer tab uses it if WebTransport is unavailable.
 - **Lobby browser** `GET /api/lobbies` · `POST /api/lobbies {name, map, capacity}`
   (shape matches `src/net/lobbies.ts`), plus `GET /api/health`.
 
@@ -34,16 +33,11 @@ go run ./cmd/server --no-wt         # HTTP/WS only (local dev)
 ```
 
 First start generates `certs/cert.pem` + `key.pem` and prints the wiring block.
-The local certificate uses ECDSA P-256 and a lifetime under 14 days for browser
-WebTransport hash pinning. Legacy, expired and near-expiry certificates are
-replaced on startup; after replacement, update the client fingerprint.
-The URL and fingerprint can also be entered in the multiplayer connection UI:
-
-```js
-// src/net/multiplayer.ts
-SERVER_URL       = 'https://127.0.0.1:4433/grimcraft';
-SERVER_CERT_HASH = '<printed sha-256>';
-```
+The server advertises its certificate fingerprint and WebSocket path at
+`/api/connection`. The browser reloads this metadata each time it joins a room.
+For a remote deployment, set `VITE_MULTIPLAYER_API_URL` when building the
+frontend. Set `--wt-public-url https://your-host:4433/grimcraft` when the
+advertised endpoint differs from the listen address.
 
 Lobby IDs are random eleven-character URL-safe strings (for example
 `uyx9VVMaH9M`), generated with `crypto/rand`. Share the frontend link
@@ -51,29 +45,31 @@ Lobby IDs are random eleven-character URL-safe strings (for example
 
 ## Two local browser sessions
 
-1. Run this server (`go run ./cmd/server`, without `--no-wt`, which disables WebTransport).
-2. In `../GrimCraft-main`, run `npm run dev` and open `http://localhost:3000`.
+1. Run this server with `go run ./cmd/server` or use `--no-wt` for WebSocket-only operation.
+2. In `../mobacraft`, run `npm run dev` and open `http://localhost:40000`.
 3. Open Multiplayer, wait for **GO SERVER · ONLINE**, then Create Game and double-click a map.
-4. Open the same frontend URL in incognito, open Multiplayer and double-click the same lobby.
+4. Copy the lobby address `http://localhost:40000/server/<room-id>`. Open it in incognito to join from the same machine.
 5. The first player is host and presses Start Game. Both browsers load the same room.
 
 The client discovers WebTransport URL and the current certificate SHA-256 from
 `GET http://127.0.0.1:8080/api/connection` (uncached), connects to QUIC/UDP `4433`,
 and sends framed Join with username, faction and preferred team. Certificate
 pinning remains enabled; no manual hash entry or certificate bypass is needed.
-Run without `--no-wt`: a disabled WebTransport endpoint produces an explicit
-error, with no automatic fallback to WebSocket.
-`Lobby` messages replicate roster, host and started
-state; `SetLobbyFaction` changes the sender's faction; `StartGame` is host-only
-and may include computer opponents. Disconnects remove that player's squads;
-late joiners receive the running room's snapshot. Simulation runs in Go at
-10 ticks/s, with full snapshots and movement deltas.
+`--no-wt` leaves the WebSocket endpoint available for the same room. The lobby
+browser accepts maps with Go layouts, including Dota 2. In Dota 2 the lobby seats
+one player on each side and `SetLobbyHero` changes the sender's hero before the
+match begins. `SetLobbyFaction` serves the RTS maps. `StartGame` is host-only
+and may include computer opponents. Dota hero movement, basic combat, bases and
+creep waves are simulated in Go at 10 ticks/s and replicated to both players.
+Players join Dota rooms before the match begins. To refresh the embedded Dota
+layout, navigation grid and unit stats, run
+`node --import tsx scripts/sync-dota-multiplayer.mjs` in `../mobacraft`.
 
 Validation:
 
 ```sh
 go test -race ./...
-cd ../GrimCraft-main
+cd ../mobacraft
 npm test
 npm run test:ts
 ```

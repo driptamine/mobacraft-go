@@ -42,3 +42,31 @@ func TestDiscoveryWithoutWebTransport(testCase *testing.T) {
 		testCase.Fatal("disabled transport must not advertise a certificate")
 	}
 }
+
+func TestLobbyCreationUsesKnownBattlefields(testCase *testing.T) {
+	handler := API(hub.NewHub(), &ConnectionInfo{WebSocketPath: "/join"})
+	for _, test := range []struct {
+		body string
+		want int
+	}{
+		{`{"name":"Network arena","map":"Default Arena","capacity":4}`, http.StatusCreated},
+		{`{"name":"Network doom","map":"/maps/4p_doom_spiral/4p_doom_spiral.sgb","capacity":4}`, http.StatusCreated},
+		{`{"name":"Too many players","map":"Doom Spiral","capacity":8}`, http.StatusBadRequest},
+		{`{"name":"Network Dota","map":"Dota 2","capacity":2}`, http.StatusCreated},
+		{`{"name":"Network Dota by path","map":"/maps/dotamap-game/map.json","capacity":2}`, http.StatusCreated},
+		{`{"name":"Too many Dota players","map":"Dota 2","capacity":4}`, http.StatusBadRequest},
+		{`{"name":"Unknown battlefield","map":"Nonexistent","capacity":2}`, http.StatusBadRequest},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/lobbies", strings.NewReader(test.body)))
+		if response.Code != test.want {
+			testCase.Fatalf("%s: got %d, want %d (%s)", test.body, response.Code, test.want, response.Body.String())
+		}
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/connection", nil))
+	var info ConnectionInfo
+	if err := json.Unmarshal(response.Body.Bytes(), &info); err != nil || info.Enabled || info.WebSocketPath != "/join" {
+		testCase.Fatalf("invalid WebSocket-only discovery: %+v, %v", info, err)
+	}
+}

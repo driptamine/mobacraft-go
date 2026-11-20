@@ -26,8 +26,9 @@ func TestJoinAssignsOpposingTeams(testCase *testing.T) {
 	if secondClient.Team != "Red" {
 		testCase.Fatalf("auto-balance failed: %q", secondClient.Team)
 	}
-	if len(testHub.RoomOf(lobby.ID).World().Squads) != 4 {
-		testCase.Fatal("each join should spawn a full skirmish seat")
+	world := testHub.RoomOf(lobby.ID).World()
+	if len(world.Squads) != 0 || len(world.Builders) != 2 || len(world.Buildings) != 2 {
+		testCase.Fatal("each join should spawn only HQ and worker")
 	}
 }
 
@@ -47,12 +48,8 @@ func TestHandleCommandMove(testCase *testing.T) {
 	lobby := testHub.CreateLobby("test", "Arena", 4)
 	client, _, _ := testHub.Join(lobby.ID, nil, "p1", "")
 	world := testHub.RoomOf(lobby.ID).World()
-	var squadID int
-	for entityID, squad := range world.Squads {
-		if squad.Owner == client.PlayerID {
-			squadID = entityID
-		}
-	}
+	// Movement commands use a deliberately created combat fixture.
+	squadID := world.SpawnSquad(client.Team, client.PlayerID).ID
 	commandJSON := `{"MoveSquads":{"squad_ids":[` + strconv.Itoa(squadID) + `],"target":{"x":10,"y":0,"z":5}}}`
 	var command map[string]any
 	if operationError := json.Unmarshal([]byte(commandJSON), &command); operationError != nil {

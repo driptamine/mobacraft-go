@@ -13,7 +13,7 @@ func canonicalFaction(faction string) string {
 		return "ig"
 	case "necron", "necrons":
 		return "necrons"
-	case "chaos", "eldar", "dark eldar", "orks", "tau":
+	case "chaos", "eldar", "dark eldar", "orks", "tau", "sob":
 		return strings.ToLower(faction)
 	default:
 		return "ig"
@@ -49,8 +49,8 @@ func baseFor(team, mapName string, slot int) (float64, float64) {
 	return BlueBaseX + float64(slot%3)*12, float64((slot%5)*6 - 12)
 }
 
-// SpawnLobbySquad spawns a full skirmish seat: HQ + builder + two squads.
-func (world *World) SpawnLobbySquad(team string, owner int, faction, mapName string) *Squad {
+// SpawnLobbySeat starts every race with a completed HQ and one worker.
+func (world *World) SpawnLobbySeat(team string, owner int, faction, mapName string) {
 	if team != "Red" {
 		team = "Blue"
 	}
@@ -70,24 +70,6 @@ func (world *World) SpawnLobbySquad(team string, owner int, faction, mapName str
 	_, _ = world.PlaceBuildingFree(owner, team, faction, "hq", protocol.Vec3{X: basePositionX, Z: basePositionZ})
 	// builder
 	world.SpawnBuilder(team, owner, faction, basePositionX+10, basePositionZ)
-	// squads
-	firstSquad := world.SpawnSquad(team, owner)
-	firstSquad.Faction = faction
-	secondSquad := world.SpawnSquad(team, owner)
-	secondSquad.Faction = faction
-	world.mutex.Lock()
-	firstSquad.Pos = protocol.Vec3{X: basePositionX + 16, Z: basePositionZ - 6}
-	secondSquad.Pos = protocol.Vec3{X: basePositionX + 16, Z: basePositionZ + 6}
-	if team == "Red" {
-		firstSquad.Pos.X, secondSquad.Pos.X = basePositionX-16, basePositionX-16
-		firstSquad.Facing = protocol.Vec3{X: -1}
-		secondSquad.Facing = protocol.Vec3{X: -1}
-	} else {
-		firstSquad.Facing = protocol.Vec3{X: 1}
-		secondSquad.Facing = protocol.Vec3{X: 1}
-	}
-	world.mutex.Unlock()
-	return firstSquad
 }
 
 // PlaceBuildingFree creates a building without cost (spawn/HQ).
@@ -112,6 +94,7 @@ func (world *World) SetFaction(owner int, faction string) {
 	defer world.mutex.Unlock()
 	if player, isValid := world.Players[owner]; isValid {
 		player.Faction = faction
+		player.Requisition, player.Energy = initialResources(faction)
 	}
 	for _, squad := range world.Squads {
 		if squad.Owner == owner {
@@ -136,8 +119,14 @@ func (world *World) SetFaction(owner int, faction string) {
 	}
 }
 func (world *World) AddComputer(team string, owner int, faction, mapName string) {
-	squad := world.SpawnLobbySquad(team, owner, faction, mapName)
+	world.SpawnLobbySeat(team, owner, faction, mapName)
 	world.mutex.Lock()
 	defer world.mutex.Unlock()
-	squad.Computer = true
+	world.Players[owner].Computer = true
+	world.Players[owner].Difficulty = "standard"
+	for _, owned := range world.Squads {
+		if owned.Owner == owner {
+			owned.Computer = true
+		}
+	}
 }

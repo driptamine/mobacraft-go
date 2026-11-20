@@ -62,7 +62,7 @@ func TestRoomContractSocketFree(testCase *testing.T) {
 	if !valid || len(players) == 0 {
 		testCase.Fatalf("snapshot players missing: %v", snapshotBody)
 	}
-	// Every skirmish kind the replica creates must be present.
+	// Worker-only starts still carry all initial replica and economy data.
 	kinds := map[string]bool{}
 	for _, entity := range entities {
 		entityRecord := entity.(map[string]any)
@@ -72,10 +72,13 @@ func TestRoomContractSocketFree(testCase *testing.T) {
 			}
 		}
 	}
-	for _, expectedValue := range []string{"squad", "soldier", "builder", "building", "strategicPoint"} {
+	for _, expectedValue := range []string{"builder", "building", "strategicPoint"} {
 		if !kinds[expectedValue] {
 			testCase.Fatalf("snapshot missing kind %q: %v", expectedValue, kinds)
 		}
+	}
+	if kinds["squad"] || kinds["soldier"] {
+		testCase.Fatal("unexpected starting combat units")
 	}
 	playerAccount := players[0].(map[string]any)
 	for _, key := range []string{"id", "requisition", "energy", "kills", "research", "team", "faction"} {
@@ -83,26 +86,26 @@ func TestRoomContractSocketFree(testCase *testing.T) {
 			testCase.Fatalf("snapshot player missing key %q", key)
 		}
 	}
-	// Pick an owned squad id for the move command.
-	squadID := 0
+	// Pick the starting worker for the move command.
+	workerID := 0
 	for _, currentEntity := range entities {
 		currentEntityRecord := currentEntity.(map[string]any)
 		components := currentEntityRecord["components"].(map[string]any)
-		if _, isValid := components["squad"]; !isValid {
+		if _, isValid := components["builder"]; !isValid {
 			continue
 		}
 		if owner, _ := components["networkOwner"].(map[string]any)["id"].(float64); int(owner) == client.PlayerID {
-			squadID = int(currentEntityRecord["id"].(float64))
+			workerID = int(currentEntityRecord["id"].(float64))
 			break
 		}
 	}
-	if squadID == 0 {
-		testCase.Fatal("no owned squad in snapshot")
+	if workerID == 0 {
+		testCase.Fatal("no owned worker in snapshot")
 	}
 
 	var command map[string]any
 	if decodeCommandError := json.Unmarshal([]byte(
-		fmt.Sprintf(`{"MoveSquads":{"squad_ids":[%d],"target":{"x":5,"y":0,"z":5}}}`, squadID)), &command); decodeCommandError != nil {
+		fmt.Sprintf(`{"MoveBuilders":{"builder_ids":[%d],"target":{"x":5,"y":0,"z":5}}}`, workerID)), &command); decodeCommandError != nil {
 		testCase.Fatal(decodeCommandError)
 	}
 	accepted, reason := hub.HandleCommand(room.World(), client.PlayerID, command)

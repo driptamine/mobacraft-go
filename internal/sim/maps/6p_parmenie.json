@@ -3,43 +3,48 @@
   "bounds": 256,
   "positions": [
     {
-      "x": -100,
-      "z": -66,
-      "team": "blue",
-      "faction": "orks"
-    },
-    {
-      "x": -102,
-      "z": 0,
+      "x": 101.86,
+      "z": -9.02,
       "team": "blue",
       "faction": "ig"
     },
     {
-      "x": -98,
-      "z": 60,
+      "x": 101.48,
+      "z": 68.03,
       "team": "blue",
-      "faction": "necrons"
+      "faction": "space marines"
     },
     {
       "x": 100,
       "z": -69,
-      "team": "red",
-      "faction": "chaos"
+      "team": "blue",
+      "faction": "eldar"
     },
     {
-      "x": 101.86,
-      "z": -9.02,
-      "team": "red",
-      "faction": "space marines"
-    },
-    {
-      "x": 101.48,
-      "z": 68.03,
+      "x": -98,
+      "z": 60,
       "team": "red",
       "faction": "dark eldar"
+    },
+    {
+      "x": -102,
+      "z": 0,
+      "team": "red",
+      "faction": "sob"
+    },
+    {
+      "x": -100,
+      "z": -66,
+      "team": "red",
+      "faction": "tau"
     }
   ],
   "strategicPoints": [
+    {
+      "x": 4,
+      "z": 0,
+      "kind": "objective"
+    },
     {
       "x": 78,
       "z": -98,
@@ -149,6 +154,16 @@
       "x": -26,
       "z": 70,
       "kind": "relic"
+    },
+    {
+      "x": 8,
+      "z": -108,
+      "kind": "objective"
+    },
+    {
+      "x": 0,
+      "z": 104,
+      "kind": "objective"
     }
   ]
 }

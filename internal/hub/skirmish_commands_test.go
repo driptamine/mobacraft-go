@@ -33,6 +33,7 @@ func TestSkirmishCommandParity(testCase *testing.T) {
 		testCase.Fatal(operationError)
 	}
 	world := gameHub.RoomOf(lobby.ID).World()
+	world.SpawnSquad(client.Team, client.PlayerID) // Combat fixture; lobby starts contain only workers.
 	squadID := ownedSquad(testCase, gameHub, lobby.ID, client.PlayerID)
 
 	// MoveUnits (schema 2) with capture point

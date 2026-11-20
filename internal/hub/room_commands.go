@@ -12,6 +12,17 @@ func (room *Room) ApplyCommand(player int, command map[string]any) (bool, string
 	if !room.running {
 		return false, "waiting for all players to finish loading"
 	}
+	if room.dota {
+		for name := range command {
+			switch name {
+			case "MoveSquads", "MoveUnits", "StopSquads", "StopUnits", "AttackSquad",
+				"AttackSoldier", "AttackBuilding", "UnitCommand", "SetStance", "SetCombatStance",
+				"AutoChase", "ResumeUnits":
+			default:
+				return false, "this command is not available in Dota"
+			}
+		}
+	}
 	return HandleCommand(room.world, player, command)
 }
 func (room *Room) snapshotFrame() []byte {
@@ -43,6 +54,19 @@ func (room *Room) snapshotFrame() []byte {
 	}
 	encodedData, _ := json.Marshal(frame)
 	return encodedData
+}
+
+func (room *Room) broadcastSnapshotLocked(loadedOnly bool) {
+	payload := room.snapshotFrame()
+	for _, client := range room.clients {
+		if !client.ready || loadedOnly && !room.loaded[client.PlayerID] {
+			continue
+		}
+		select {
+		case client.Out <- payload:
+		default:
+		}
+	}
 }
 
 // All connected humans must finish loading; computers are server-side and ready.
